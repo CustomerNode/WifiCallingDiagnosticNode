@@ -6,7 +6,7 @@
 #
 set -uo pipefail
 
-VERSION="1.0.0"
+VERSION="0.1.0"   # experimental: verdicts are confidence-based heuristics, not proof
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 LIB="$SCRIPT_DIR/lib"
 
@@ -15,11 +15,12 @@ LIB="$SCRIPT_DIR/lib"
 
 usage() {
   cat <<EOF
-${C_BOLD}wcdiag${C_RESET} v$VERSION — WiFi Calling Diagnostic Node
+${C_BOLD}wcdiag${C_RESET} v$VERSION (experimental) — WiFi Calling Diagnostic Node
 
 WiFi calls ride an IPsec tunnel to your carrier's ePDG. When they fail but data
-works, the fault is almost always the local path, the NAT, or the WiFi layer.
-wcdiag finds which — and can turn this box into an AP to watch the tunnel itself.
+works, the fault is usually the local path, the NAT, or the WiFi layer. wcdiag
+gathers evidence for which — and can turn this box into an AP to watch the tunnel.
+Its verdicts are confidence-based heuristics over encrypted metadata, not proof.
 
 ${C_BOLD}usage:${C_RESET} wcdiag <command> [options]
 

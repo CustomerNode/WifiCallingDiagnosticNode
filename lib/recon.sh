@@ -11,36 +11,41 @@ IPv6 internet reachability, and DNS servers.
 EOF
 }
 
-# Walk the path to the internet and classify each hop; count NAT layers.
+# Walk the path to the internet, classify each hop, estimate NAT depth.
+# NAT layers sit at the *start* of the path, so we count LEADING consecutive
+# private hops (stopping at the first non-private hop) rather than all private
+# hops anywhere -- a private hop deeper in the path is usually ISP infra, not a
+# NAT you own. This is still a heuristic (see the caveat printed below).
 _recon_path() {
-  local target="${1:-1.1.1.1}" tool hop ip cls privhops
+  local target="${1:-1.1.1.1}" tool tmp hop ip privhops=0 stop=0
   if have traceroute; then tool="traceroute -n -w2 -q1 -m8 $target"
   elif have tracepath; then tool="tracepath -n -m8 $target"
   else warn "no traceroute/tracepath; skipping path analysis"; return 0; fi
 
-  info "path to $target:"
-  # Normalize both tools to "<n> <ip>" lines.
+  tmp=$(mktemp)
+  # Normalize both tools to "<hop> <ip>" lines, drop consecutive dupes. One run.
   $tool 2>/dev/null | awk '
       /^[[:space:]]*[0-9]+/ {
         n=$1; sub(/[:?]/,"",n)
         for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print n, $i; break }
-      }' | awk '!seen[$2]++' | while read -r hop ip; do
-    cls=$(ip_class "$ip")
-    printf '      %2s  %-17s (%s)\n' "$hop" "$ip" "$cls"
-  done
+      }' | awk '!seen[$2]++' > "$tmp"
 
-  # Second pass for the verdict (subshell above can't export nat count).
-  local privhops
-  privhops=$($tool 2>/dev/null | awk '
-      /^[[:space:]]*[0-9]+/ {
-        for (i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; break }
-      }' | awk '!s[$0]++' | while read -r ip; do
-        case "$(ip_class "$ip")" in private) echo x ;; esac
-      done | wc -l)
+  info "path to $target:"
+  while read -r hop ip; do
+    printf '      %2s  %-17s (%s)\n' "$hop" "$ip" "$(ip_class "$ip")"
+  done < "$tmp"
 
-  if   [ "$privhops" -ge 2 ]; then bad  "NAT depth: $privhops private hops -> DOUBLE NAT (breaks WiFi Calling)"
-  elif [ "$privhops" -eq 1 ]; then ok   "NAT depth: single NAT (healthy for WiFi Calling)"
-  else warn "NAT depth: could not determine (path may filter ICMP)"; fi
+  while read -r hop ip; do
+    if [ "$stop" = 0 ] && [ "$(ip_class "$ip")" = private ]; then privhops=$((privhops+1)); else stop=1; fi
+  done < "$tmp"
+  rm -f "$tmp"
+
+  if   [ "$privhops" -ge 2 ]; then
+    warn "NAT depth: ${privhops} leading private hops -> LIKELY double NAT"
+    info "      double NAT can disrupt WiFi Calling's NAT traversal, but does not"
+    info "      always break it; VPNs/ISP infra/filtered traceroutes can look similar."
+  elif [ "$privhops" -eq 1 ]; then ok "NAT depth: single leading private hop (typical single-NAT home)"
+  else warn "NAT depth: undetermined (path filters ICMP, or no private hop seen)"; fi
 }
 
 recon_main() {

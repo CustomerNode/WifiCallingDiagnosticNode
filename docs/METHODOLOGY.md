@@ -24,14 +24,16 @@ web traffic is not: it needs a **stable path**, **clean NAT traversal**, and an
 
 ### 1. Double NAT
 Two routers in series (e.g. a mesh router in *router* mode behind the ISP gateway),
-each performing NAT. IPsec NAT-traversal assumes one translation; two mangle the port
-mappings and the media path. Symptom: intermittent setup failures, one-way audio,
-straight-to-voicemail.
+each performing NAT. IPsec NAT-traversal assumes one translation; two can mangle the
+port mappings and the media path. Symptom: intermittent setup failures, one-way audio,
+straight-to-voicemail. (Double NAT *degrades* WiFi Calling more often than it
+hard-breaks it — plenty of double-NAT'd networks still place calls.)
 
-**Detected by:** `wcdiag recon` walks the path to the internet and counts private
-(RFC1918) hops before the first public address. **Two or more private hops ⇒ double
-NAT.** Fix: collapse to a single NAT (put the ISP gateway in IP-passthrough/bridge, or
-bridge the inner router).
+**Detected by:** `wcdiag recon` walks the path to the internet and counts *leading*
+consecutive private (RFC1918) hops before the first non-private hop. **Two or more ⇒
+*likely* double NAT** — a heuristic, since VPNs, ISP infrastructure, or filtered
+traceroutes can also present extra private hops. Fix: collapse to a single NAT (put the
+ISP gateway in IP-passthrough/bridge, or bridge the inner router).
 
 ### 2. Mesh roaming
 A multi-node mesh steers the client between access points (or bands) mid-call. Each
@@ -39,8 +41,9 @@ handoff can drop the tunnel, forcing a re-handshake — or just losing enough pa
 kill the call.
 
 **Detected by:** `wcdiag capture` + `analyze`. On a single AP the tunnel handshakes
-once and stays up. Repeated **UDP 500 exchanges after setup** indicate the tunnel was
-re-established mid-call — a roaming fingerprint.
+once. `analyze` groups **UDP 500 packets into time-separated bursts**; more than one
+well-separated burst means the tunnel was re-keyed/re-established mid-session — a
+roaming *lead* (not proof: a long idle re-key can also trigger a second burst).
 
 ### 3. Broken or absent IPv6
 Some carriers prefer IPv6 for the ePDG. A network that advertises IPv6 but can't route
@@ -55,10 +58,13 @@ The tunnel and signaling come up (the call "connects"), but RTP can't traverse t
 in one or both directions. Symptom: connected call with **one-way audio**, or ringing
 that dumps to voicemail with no media.
 
-**Detected by:** `wcdiag analyze` measures **uplink vs downlink** packet rates inside
-the tunnel. A live voice stream is ~50 packets/sec (20 ms frames). Downlink streaming
-while uplink is silent ⇒ your voice isn't traversing (they can't hear you), and vice
-versa.
+**Detected by:** `wcdiag analyze` compares **uplink vs downlink** rates of
+*voice-band* packets (a configurable size window, default 80–240 B, to exclude
+keepalives and large signaling) and requires a **sustained run of seconds** at rate
+before calling it a stream. Downlink sustained while uplink is absent ⇒ *possible*
+one-way (they can't hear you). This is a confidence-tagged heuristic over encrypted
+metadata — "listening only" looks identical — so it is a lead to confirm against what
+you heard, not proof of RTP direction.
 
 ## Why a wired box can't see everything — and the fix
 

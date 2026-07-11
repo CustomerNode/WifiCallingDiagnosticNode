@@ -8,6 +8,10 @@ wcdiag-capture/
 wcdiag-doctor.csv
 wcdiag-monitor.csv
 
+# committed test fixtures are the exception to the *.log rule above
+!tests/fixtures/
+!tests/fixtures/*.log
+
 # editors / os
 *.swp
 .DS_Store

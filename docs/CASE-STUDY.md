@@ -18,11 +18,11 @@ couldn't hear us).
   2  192.168.y.1        (private)   ISP gateway
   3  100.64.x.x         (cgnat)     carrier edge
   ...
-  [FAIL] NAT depth: 2 private hops -> DOUBLE NAT (breaks WiFi Calling)
+  [warn] NAT depth: 2 leading private hops -> LIKELY double NAT
 ```
 
-Two private hops = **double NAT**: a mesh router in *router mode* behind the ISP
-gateway. `recon` also flagged **no global IPv6** (ULA only). The pipe itself was
+Two leading private hops = **likely double NAT**: a mesh router in *router mode* behind
+the ISP gateway. `recon` also flagged **no global IPv6** (ULA only). The pipe itself was
 pristine — 0% loss to the gateway, the internet, and the carrier ePDG.
 
 ## Step 2 — the ePDG is reachable, so it's not "blocked"
@@ -54,15 +54,17 @@ placed the previously-failing call. For the first time the tunnel was visible:
   == Tunnel establishment ==
   [ ok ] IKE_SA_INIT (udp/500) at   14:13:49
   [ ok ] NAT-T switch (udp/4500) at 14:13:49
-  [ ok ] no mid-call re-handshake (tunnel stable, no roaming drop)
+  [ ok ] 1 IKE handshake burst -> stable (no re-key/roaming signal)
 
-  == Audio direction ==
-  14:14:11   UP  28 | DOWN  50
-  14:14:12   UP  17 | DOWN  51        <- two-way voice streams present
+  == Voice-stream heuristic ==
+  +  1s   voiceUP  28 | voiceDOWN  50
+  +  2s   voiceUP  17 | voiceDOWN  51
+  [ ok ] two-way voice stream observed -> media path looks healthy  [MEDIUM confidence]
 ```
 
 Through the box's **single AP**, the tunnel came up in ~2.5 s, **stayed up**, and voice
-flowed **both ways**. The calls **worked**.
+flowed **both ways** (a MEDIUM-confidence read — enough, with the "it worked" report,
+to pin the residual fault on the mesh). The calls **worked**.
 
 ## Conclusion
 

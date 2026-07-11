@@ -37,6 +37,8 @@ _epdg_probe_one() {
       continue
     fi
     info "$host -> $ips"
+    local ip6; ip6=$(dig +short +time=2 +tries=1 AAAA "$host" 2>/dev/null | grep -E ':' | tr '\n' ' ')
+    [ -n "$ip6" ] && info "    AAAA: ${ip6}(carrier may prefer the IPv6 ePDG when v6 is up)"
     ip=$(printf '%s' "$ips" | awk '{print $1}')
     local r; r=$(rtt "$ip")
     [ "$r" = LOSS ] && info "    icmp: no reply (normal; many ePDGs drop ping)" || ok "    icmp: ${r} ms"
@@ -55,6 +57,9 @@ epdg_main() {
     _epdg_probe_one "$carrier"
   fi
   hdr "Note"
+  info "ePDG hostnames here are the common public ones, but resolution varies by"
+  info "subscriber, DNS, region, and device -- some only resolve on-device. A blank"
+  info "answer is not proof the carrier is unreachable."
   info "'open' means no ICMP reject was seen -- the first tunnel packet can leave. It"
   info "does NOT prove the full tunnel survives NAT. If egress is open but calls fail,"
   info "capture the tunnel with 'wcdiag capture' to see where it actually breaks."

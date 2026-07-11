@@ -1,17 +1,28 @@
 # shellcheck shell=bash
-# lib/analyze.sh — read a captured tunnel and report what the call actually did:
-# tunnel establishment, whether it stayed up (roaming), and audio direction
-# (the one-way-audio verdict) from per-second packet rates.
+# lib/analyze.sh — read a captured tunnel and report what the call likely did.
+#
+# IMPORTANT: everything here is a HEURISTIC over IPsec *metadata*. The tunnel
+# payload is encrypted, so we cannot see RTP directly. We infer a "voice stream"
+# from packet size + a sustained per-second rate, and we label every verdict with
+# a confidence level. These are leads to confirm against what you actually heard,
+# not definitive diagnoses.
+#
+# Tunables (env overrides): WCDIAG_VOICE_MINB / _MAXB (voice-frame byte band),
+# WCDIAG_VOICE_RATE (min packets/sec to call a second "streaming"),
+# WCDIAG_VOICE_RUN (min consecutive such seconds), WCDIAG_HS_GAP (sec gap that
+# separates two IKE handshake bursts).
 
 analyze_usage() {
   cat <<'EOF'
 usage: wcdiag analyze <tunnel.log | tunnel.pcap>
 
-Analyzes a capture from 'wcdiag capture':
+Heuristic read of a capture from 'wcdiag capture':
   - when/if the IPsec tunnel established (UDP 500 -> 4500 handshake)
-  - whether it stayed up or re-handshaked mid-call (a sign of WiFi roaming)
-  - per-second uplink vs downlink packet rates
-  - a one-way-audio verdict (a full voice stream is ~50 packets/sec)
+  - how many separate IKE handshake bursts occurred (re-key / roaming signal)
+  - per-second voice-band packet rates per direction
+  - a CONFIDENCE-TAGGED audio observation (not proof of RTP direction)
+
+All thresholds are heuristics; override with WCDIAG_VOICE_* / WCDIAG_HS_GAP.
 EOF
 }
 
@@ -40,6 +51,10 @@ analyze_main() {
   [ -r "$src" ] || die "cannot read: $src"
   require_cmd awk
 
+  local VMIN=${WCDIAG_VOICE_MINB:-80} VMAX=${WCDIAG_VOICE_MAXB:-240}
+  local VRATE=${WCDIAG_VOICE_RATE:-20} VRUN=${WCDIAG_VOICE_RUN:-2}
+  local HSGAP=${WCDIAG_HS_GAP:-5}
+
   local tmp; tmp=$(mktemp)
   case "$src" in
     *.pcap|*.pcapng)
@@ -59,54 +74,63 @@ analyze_main() {
   [ -n "$local_ip" ] && [ -n "$epdg_ip" ] || { rm -f "$tmp"; die "could not identify both endpoints"; }
 
   hdr "Tunnel establishment"
-  local first500 first4500 span_start span_end reinit
+  local first500 first4500 span_start span_end
   first500=$(grep -m1 '\.500 >' "$tmp"  | awk '{print $2}')
   first4500=$(grep -m1 '\.4500 >' "$tmp" | awk '{print $2}')
   span_start=$(head -1 "$tmp" | awk '{print $2}')
   span_end=$(tail -1 "$tmp"   | awk '{print $2}')
   info "capture span:      $span_start .. $span_end"
-  [ -n "$first500" ]  && ok "IKE_SA_INIT (udp/500) at   $first500"  || warn "no udp/500 seen"
+  [ -n "$first500" ]  && ok "IKE_SA_INIT (udp/500) at   $first500"  || warn "no udp/500 seen (tunnel may predate the capture)"
   [ -n "$first4500" ] && ok "NAT-T switch (udp/4500) at  $first4500" || warn "no udp/4500 seen"
-  # grep -c already prints 0 (and exits 1) on no match; don't append a second 0
-  reinit=$(grep -c '\.500 >' "$tmp" 2>/dev/null); reinit=${reinit:-0}
-  if [ "${reinit:-0}" -gt 4 ]; then
-    warn "multiple udp/500 exchanges ($reinit) -- tunnel may have re-handshaked (WiFi roaming?)"
-  else
-    ok "no mid-call re-handshake (tunnel stable, no roaming drop)"
-  fi
 
-  # per-second table -> $tmp.tbl (shown); summary numbers -> $tmp.sum (parsed)
-  hdr "Audio direction (per second: UP=you->them  DOWN=them->you)"
-  awk -v L="$local_ip" -v E="$epdg_ip" -v SUM="$tmp.sum" '
-    { split($2,t,"."); sec=t[1]
-      if (index($0, L".") && index($0, "> "E)) { o[sec]++; oo++ }
-      else if (index($0, E".") && index($0, "> "L)) { d[sec]++; dd++ }
-      seen[sec]=1 }
-    END {
-      c=0; for(s in seen) key[++c]=s
-      for(i=1;i<=c;i++) for(j=i+1;j<=c;j++) if(key[i]>key[j]){sw=key[i];key[i]=key[j];key[j]=sw}
-      pu=0; pd=0
-      for(i=1;i<=c;i++){ s=key[i]
-        printf "  %s   UP %3d | DOWN %3d\n", s, o[s]+0, d[s]+0
-        if(o[s]>pu)pu=o[s]; if(d[s]>pd)pd=d[s] }
-      printf "%d %d %d %d\n", oo+0, dd+0, pu, pd > SUM
+  # Burst-based re-handshake detection: group udp/500 packets into time-separated
+  # bursts (gap > HSGAP). One burst = a normal handshake (init + retries). More
+  # than one well-separated burst suggests a re-key / re-establish (e.g. roaming).
+  local bursts
+  bursts=$(awk -v GAP="$HSGAP" '
+    /\.500 >/ { split($2,t,":"); split(t[3],s,"."); now=t[1]*3600+t[2]*60+s[1]
+                if (prev=="" || now-prev>GAP) b++; prev=now }
+    END { print b+0 }' "$tmp")
+  if   [ "${bursts:-0}" -le 1 ]; then ok  "1 IKE handshake burst -> stable (no re-key/roaming signal)"
+  else warn "${bursts} separate IKE handshake bursts -> tunnel re-keyed/re-established (possible WiFi roaming)"; fi
+
+  # Voice-stream heuristic: count only voice-band packets, per direction, per
+  # second; a "stream" requires a sustained run of seconds at >= VRATE.
+  hdr "Voice-stream heuristic (per second: only ${VMIN}-${VMAX}B packets counted as candidate voice)"
+  awk -v L="$local_ip" -v E="$epdg_ip" -v LO="$VMIN" -v HI="$VMAX" -v RATE="$VRATE" -v SUM="$tmp.sum" '
+    function secnum(ts,   a,b){ split(ts,a,":"); split(a[3],b,"."); return a[1]*3600+a[2]*60+b[1] }
+    function longest_run(K,c,arr,RATE,   i,s,run,best,prev){
+      best=0; run=0; prev=-999
+      for(i=1;i<=c;i++){ s=K[i]; if(arr[s]+0>=RATE){ if(s==prev+1)run++; else run=1; if(run>best)best=run; prev=s } }
+      return best }
+    { sz=$NF+0; s=secnum($2); seen[s]=1
+      up=(index($0,L".") && index($0,"> "E)); dn=(index($0,E".") && index($0,"> "L))
+      if(sz>=LO && sz<=HI){ if(up){uv[s]++; if(uv[s]>upk)upk=uv[s]} else if(dn){dv[s]++; if(dv[s]>dpk)dpk=dv[s]} } }
+    END{
+      c=0; for(s in seen) K[++c]=s
+      for(i=1;i<=c;i++) for(j=i+1;j<=c;j++) if(K[i]>K[j]){sw=K[i];K[i]=K[j];K[j]=sw}
+      for(i=1;i<=c;i++){ s=K[i]; if(uv[s]||dv[s]) printf "  +%3ds   voiceUP %3d | voiceDOWN %3d\n", s-K[1], uv[s]+0, dv[s]+0 }
+      printf "%d %d %d %d\n", longest_run(K,c,uv,RATE), longest_run(K,c,dv,RATE), upk+0, dpk+0 > SUM
     }' "$tmp" | tee "$tmp.tbl"
 
-  local uptot downtot peakup peakdown
-  read -r uptot downtot peakup peakdown < "$tmp.sum" 2>/dev/null
-  peakup=${peakup:-0}; peakdown=${peakdown:-0}; uptot=${uptot:-0}; downtot=${downtot:-0}
+  local urun drun upk dpk
+  read -r urun drun upk dpk < "$tmp.sum" 2>/dev/null
+  urun=${urun:-0}; drun=${drun:-0}; upk=${upk:-0}; dpk=${dpk:-0}
 
-  hdr "Verdict"
-  info "totals  UP:${uptot:-0}  DOWN:${downtot:-0}    peak  UP:${peakup}/s  DOWN:${peakdown}/s  (voice stream ~= 50/s)"
-  if   [ "$peakdown" -ge 25 ] && [ "$peakup" -lt 8 ]; then
-    bad "downlink streamed, uplink did not -> ONE-WAY (they can't hear you) OR you were only listening"
-  elif [ "$peakup" -ge 25 ] && [ "$peakdown" -lt 8 ]; then
-    bad "uplink streamed, downlink did not -> ONE-WAY (you can't hear them)"
-  elif [ "$peakup" -ge 20 ] && [ "$peakdown" -ge 20 ]; then
-    ok "two-way voice streams present -> media path healthy on this network"
+  hdr "Observation (heuristic, confidence-tagged -- NOT proof)"
+  info "sustained voice window  UP:${urun}s  DOWN:${drun}s    peak voice-band  UP:${upk}/s  DOWN:${dpk}/s"
+  if   [ "$urun" -ge "$VRUN" ] && [ "$drun" -ge "$VRUN" ]; then
+    ok "two-way voice stream observed -> media path looks healthy on this network  [MEDIUM confidence]"
+  elif [ "$drun" -ge "$VRUN" ] && [ "$urun" -lt 1 ]; then
+    warn "downlink sustained, uplink absent -> POSSIBLE one-way (they can't hear you)  [LOW confidence]"
+  elif [ "$urun" -ge "$VRUN" ] && [ "$drun" -lt 1 ]; then
+    warn "uplink sustained, downlink absent -> POSSIBLE one-way (you can't hear them)  [LOW confidence]"
+  elif [ "$urun" -ge "$VRUN" ] || [ "$drun" -ge "$VRUN" ]; then
+    info "one direction streamed, the other was partial -> asymmetric, inconclusive"
   else
-    warn "no sustained voice stream -- call may not have connected, or was too short"
+    info "no sustained two-way voice stream in this capture -> inconclusive (short/no call?)"
   fi
-  info "note: 'listening only' also shows low uplink; confirm against what you heard."
+  info "caveat: encrypted UDP/4500 also carries IMS signaling, keepalives, and"
+  info "retransmits; 'listening only' mimics one-way. Confirm against what you heard."
   rm -f "$tmp" "$tmp.sum" "$tmp.tbl"
 }

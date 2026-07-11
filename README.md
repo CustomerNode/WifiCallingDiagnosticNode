@@ -2,9 +2,15 @@
 
 **Turn a spare Linux box into an instrument that finds why WiFi calls fail.**
 
+[![CI](https://github.com/CustomerNode/WifiCallingDiagnosticNode/actions/workflows/ci.yml/badge.svg)](https://github.com/CustomerNode/WifiCallingDiagnosticNode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux-blue.svg)
-![Shell](https://img.shields.io/badge/shell-bash-lightgrey.svg)
+![Status](https://img.shields.io/badge/status-experimental-orange.svg)
+
+> **Status: experimental (v0.1.0).** wcdiag gathers evidence and prints
+> *confidence-tagged observations*, not definitive diagnoses. Its audio and
+> NAT-depth calls are heuristics over encrypted metadata — treat them as leads to
+> confirm against what you actually experienced, not proof.
 
 When you have no cell signal, every call rides **WiFi Calling (VoWiFi)** — an
 encrypted IPsec tunnel from your phone to your carrier's gateway (the *ePDG*) over
@@ -24,11 +30,11 @@ it, where it can be captured and read packet-by-packet.**
 
 | Command | What you get |
 |---|---|
-| `wcdiag recon` | Interfaces, gateway, **NAT depth (flags double NAT)**, ISP/public IP, IPv6 reachability, DNS |
-| `wcdiag epdg <carrier>` | Resolves the carrier ePDG (Verizon / AT&T / T-Mobile) and probes UDP 500/4500 egress |
+| `wcdiag recon` | Interfaces, gateway, **NAT depth (flags *likely* double NAT)**, ISP/public IP, IPv6 reachability, DNS |
+| `wcdiag epdg <carrier>` | Resolves the carrier ePDG (Verizon / AT&T / T-Mobile), A + AAAA, probes UDP 500/4500 egress |
 | `wcdiag monitor` | 1/sec latency + loss log of the call path; reproduce a failed call and correlate |
 | `wcdiag capture` | Stands up a WiFi AP + captures the phone's real IPsec tunnel |
-| `wcdiag analyze <file>` | Reads a capture: tunnel setup, roaming re-handshakes, **one-way-audio verdict** |
+| `wcdiag analyze <file>` | Reads a capture: tunnel setup, handshake-burst count (roaming), **confidence-tagged one-way-audio lead** |
 | `wcdiag doctor` | Runs recon + ePDG + a short monitor, then a plain-english verdict |
 
 ---
@@ -92,20 +98,36 @@ WiFi Calling establishes an **IKEv2/IPsec** tunnel to the carrier's **ePDG** and
 carries SIP/IMS signaling and RTP voice inside it. Four things commonly break it,
 each with a distinct signature `wcdiag` looks for:
 
-1. **Double NAT** — two routers each NAT the tunnel; NAT-traversal mangles, media
-   fails. `recon` counts private hops on the path to the internet.
+1. **Double NAT** — two routers each NAT the tunnel; NAT-traversal can be mangled and
+   media fails. `recon` counts *leading* private hops (a heuristic — VPNs, ISP infra,
+   or filtered traceroutes can look similar, and double NAT degrades more often than
+   it hard-breaks).
 2. **Mesh roaming** — the phone is steered between mesh nodes mid-call and the tunnel
-   is torn down. `capture` + `analyze` catch the re-handshake.
+   is re-keyed. `analyze` counts time-separated IKE handshake bursts as a roaming lead.
 3. **Broken/absent IPv6** — some carriers prefer IPv6; a half-broken v6 stalls setup.
    `recon` checks global v6 reachability.
 4. **Media-plane NAT failure** — signaling connects but RTP can't traverse the NAT →
-   one-way audio / straight-to-voicemail. `analyze` measures uplink vs downlink
-   voice packet rates.
+   one-way audio / straight-to-voicemail. `analyze` compares uplink vs downlink
+   *voice-band* packet rates over sustained windows (size- and time-filtered
+   heuristic, confidence-tagged — encrypted payload can't be read directly).
 
 Full write-up: **[docs/METHODOLOGY.md](docs/METHODOLOGY.md)**.
 A real end-to-end debug: **[docs/CASE-STUDY.md](docs/CASE-STUDY.md)**.
 
 ---
+
+## Tests
+
+Offline, no network or hardware needed:
+
+```bash
+bash tests/run.sh                              # ip_class boundary checks + analyze
+                                               # verdict assertions on fixed captures
+shellcheck wcdiag lib/*.sh tests/run.sh        # lint
+```
+
+CI (`.github/workflows/ci.yml`) runs both on every push. The fixtures under
+`tests/fixtures/` are synthetic tcpdump logs using RFC 5737 documentation IPs.
 
 ## Privacy & safety
 
