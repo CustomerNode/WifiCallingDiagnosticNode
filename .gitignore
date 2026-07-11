@@ -1,0 +1,13 @@
+# wcdiag runtime output — never commit captures or logs (they contain your
+# public IP, device MACs, and other identifying network data)
+*.pcap
+*.pcapng
+*.csv
+*.log
+wcdiag-capture/
+wcdiag-doctor.csv
+wcdiag-monitor.csv
+
+# editors / os
+*.swp
+.DS_Store

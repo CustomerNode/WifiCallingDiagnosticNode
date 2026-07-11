@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#
+# wcdiag — WiFi Calling Diagnostic Node
+# Turn a Linux box into an instrument that finds why WiFi calls fail.
+# https://github.com/CustomerNode/WifiCallingDiagnosticNode
+#
+set -uo pipefail
+
+VERSION="1.0.0"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LIB="$SCRIPT_DIR/lib"
+
+# shellcheck source=lib/common.sh
+. "$LIB/common.sh"
+
+usage() {
+  cat <<EOF
+${C_BOLD}wcdiag${C_RESET} v$VERSION — WiFi Calling Diagnostic Node
+
+WiFi calls ride an IPsec tunnel to your carrier's ePDG. When they fail but data
+works, the fault is almost always the local path, the NAT, or the WiFi layer.
+wcdiag finds which — and can turn this box into an AP to watch the tunnel itself.
+
+${C_BOLD}usage:${C_RESET} wcdiag <command> [options]
+
+${C_BOLD}commands:${C_RESET}
+  recon              map the path: interfaces, NAT depth (double-NAT!), ISP, IPv6, DNS
+  epdg [carrier]     resolve & probe the carrier ePDG   (verizon|att|tmobile|all)
+  monitor [opts]     1/sec latency+loss log of the call path; correlate to a failed call
+  capture [opts]     stand up a WiFi AP + capture the phone's actual call tunnel
+  analyze <file>     read a capture: tunnel, roaming, one-way-audio verdict
+  doctor             run recon + epdg + a short monitor, then a plain-english verdict
+  version            print version
+  help               this help
+
+${C_BOLD}typical flow:${C_RESET}
+  wcdiag doctor                     # get the lay of the land + a verdict
+  wcdiag monitor --carrier verizon  # leave running, reproduce a failed call
+  sudo wcdiag capture               # phone joins the AP; place the failing call
+  wcdiag analyze ./wcdiag-capture/tunnel.log
+
+Run 'wcdiag <command> --help' for command-specific options.
+EOF
+}
+
+doctor_main() {
+  hdr "wcdiag doctor"
+  info "running recon, ePDG probe, and a 20s path sample..."
+  # subshell each stage so a die/exit inside one cannot abort the whole run
+  . "$LIB/recon.sh"; ( recon_main ) || true
+  . "$LIB/epdg.sh";  ( epdg_main all ) || true
+  . "$LIB/monitor.sh"
+  hdr "20-second path sample"
+  local csv; csv=$(mktemp); rm -f "$csv"   # let monitor create it fresh (with header)
+  ( monitor_main --duration 20 --out "$csv" ) >/dev/null 2>&1 || true
+  awk -F, 'NR>1{n++; if($2=="LOSS")g++; if($3=="LOSS")i++}
+    END{printf "  samples:%d  gateway-loss:%d  internet-loss:%d\n", n, g+0, i+0}' "$csv" 2>/dev/null
+  rm -f "$csv"
+  hdr "Verdict"
+  info "If NAT depth showed DOUBLE NAT  -> collapse it (router IP-passthrough/bridge)."
+  info "If the path sample is clean but calls still fail -> it's the tunnel or WiFi:"
+  info "  run 'sudo wcdiag capture' and place a failing call to see the tunnel itself."
+  info "If loss tracked the failure -> transient RF/WAN; check the AP and uplink."
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  recon)    . "$LIB/recon.sh";   recon_main   "$@" ;;
+  epdg)     . "$LIB/epdg.sh";    epdg_main    "$@" ;;
+  monitor)  . "$LIB/monitor.sh"; monitor_main "$@" ;;
+  capture)  . "$LIB/capture.sh"; capture_main "$@" ;;
+  analyze)  . "$LIB/analyze.sh"; analyze_main "$@" ;;
+  doctor)   doctor_main "$@" ;;
+  version|--version|-v) echo "wcdiag v$VERSION" ;;
+  help|--help|-h) usage ;;
+  *) err "unknown command: $cmd"; echo; usage; exit 1 ;;
+esac
